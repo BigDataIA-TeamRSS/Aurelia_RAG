@@ -1,0 +1,13 @@
+# Core dependencies
+fastapi>=0.116.0
+uvicorn==0.27.0
+streamlit==1.39.0  # Latest version compatible with numpy 2.x
+openai==1.10.0
+python-dotenv==1.0.0
+pydantic==2.10.3
+pydantic-core==2.11.0
+requests>=2.32.0
+numpy>=2.0.0  # NumPy 2.x for Python 3.13
+pandas>=2.2.0  # Compatible with numpy 2.x
+docarray
+langchain
