@@ -1,0 +1,15 @@
+chromadb>=0.4.0
+langchain>=0.1.0
+langchain-text-splitters>=0.0.1
+langchain-openai>=0.0.5
+wikipedia>=1.4.0
+PyMuPDF>=1.23.0
+google-cloud-storage>=2.10.0
+cloud-sql-python-connector[pg8000]
+pandas>=2.0.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+docarray
+pinecone
+instructor>=1.0.0
