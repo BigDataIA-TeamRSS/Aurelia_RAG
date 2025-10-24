@@ -71,7 +71,6 @@ def ensure_cache_table():
 
 # ---------- vector store (Chroma) ----------
 def get_chroma_collection():
-<<<<<<< HEAD
     try:
         # If you're running chroma server: `chroma run --path <dir> --port 8000`
         client = chromadb.HttpClient(
@@ -85,17 +84,6 @@ def get_chroma_collection():
     except Exception as e:
         print(f"Warning: Could not connect to ChromaDB: {e}")
         return None
-=======
-    # If you’re running chroma server: `chroma run --path <dir> --port 8000`
-    client = chromadb.HttpClient(
-        host=CHROMADB_HOST,
-        port=CHROMADB_PORT,
-        settings=Settings(allow_reset=False, anonymized_telemetry=False, headers={
-            "Authorization": f"Bearer {CHROMADB_API_KEY}"
-        } if CHROMADB_API_KEY else None),
-    )
-    return client.get_or_create_collection(name=CHROMA_COLLECTION, metadata={"hnsw:space": "cosine"})
->>>>>>> 2effb648194d6c5260b340d210873751f7046573
 
 @dataclass
 class RetrievedChunk:
@@ -107,7 +95,6 @@ class RetrievedChunk:
 
 def search_pdf_chunks(query: str, k: int = PDF_TOP_K) -> List[RetrievedChunk]:
     col = get_chroma_collection()
-<<<<<<< HEAD
     if col is None:
         print("ChromaDB not available, returning empty results")
         return []
@@ -130,22 +117,6 @@ def search_pdf_chunks(query: str, k: int = PDF_TOP_K) -> List[RetrievedChunk]:
     except Exception as e:
         print(f"Error searching ChromaDB: {e}")
         return []
-=======
-    res = col.query(query_texts=[query], n_results=k, include=["documents", "metadatas", "distances"])
-    chunks: List[RetrievedChunk] = []
-    if not res or not res.get("documents"):
-        return chunks
-    for doc, meta, dist in zip(res["documents"][0], res["metadatas"][0], res.get("distances", [[None]])[0]):
-        chunks.append(
-            RetrievedChunk(
-                content=doc,
-                page=meta.get("page"),
-                section=meta.get("section"),
-                score=(1.0 - dist) if isinstance(dist, (int,float)) else None
-            )
-        )
-    return chunks
->>>>>>> 2effb648194d6c5260b340d210873751f7046573
 
 # ---------- wikipedia fallback ----------
 def fetch_wikipedia_summary(topic: str, sentences: int = 3) -> Optional[Dict[str, Any]]:
@@ -219,7 +190,6 @@ def synthesize_answer(query: str, pdf_chunks: List[RetrievedChunk], wiki: Option
 
 # ---------- cache helpers ----------
 def cache_get(concept: str) -> Optional[Dict[str, Any]]:
-<<<<<<< HEAD
     try:
         with get_pg_conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT concept, answer, sources, created_at FROM concept_cache WHERE concept=%s", (concept,))
@@ -240,21 +210,6 @@ def cache_put(concept: str, answer: str, sources: Dict[str, Any]) -> None:
             """, (concept, answer, json.dumps(sources)))
     except Exception as e:
         print(f"Warning: Could not save to cache: {e}")
-=======
-    with get_pg_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT concept, answer, sources, created_at FROM concept_cache WHERE concept=%s", (concept,))
-        row = cur.fetchone()
-        return row if row else None
-
-def cache_put(concept: str, answer: str, sources: Dict[str, Any]) -> None:
-    with get_pg_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-        INSERT INTO concept_cache (concept, answer, sources)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (concept) DO UPDATE
-          SET answer=EXCLUDED.answer, sources=EXCLUDED.sources, created_at=NOW()
-        """, (concept, answer, json.dumps(sources)))
->>>>>>> 2effb648194d6c5260b340d210873751f7046573
 
 # ---------- pydantic models ----------
 class QueryRequest(BaseModel):
@@ -284,20 +239,15 @@ class SeedResponse(BaseModel):
 # ---------- startup ----------
 @app.on_event("startup")
 def on_startup():
-<<<<<<< HEAD
     try:
         ensure_cache_table()
     except Exception as e:
         print(f"Warning: Could not initialize database cache: {e}")
         print("Application will continue without caching functionality")
-=======
-    ensure_cache_table()
->>>>>>> 2effb648194d6c5260b340d210873751f7046573
 
 # ---------- endpoints ----------
 @app.get("/healthz")
 def healthz():
-<<<<<<< HEAD
     return {
         "ok": True, 
         "service": APP_NAME, 
@@ -312,9 +262,6 @@ def root():
         "version": "1.0.0",
         "endpoints": ["/healthz", "/query", "/seed", "/docs"]
     }
-=======
-    return {"ok": True, "service": APP_NAME, "time": int(time.time())}
->>>>>>> 2effb648194d6c5260b340d210873751f7046573
 
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest):
