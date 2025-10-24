@@ -17,42 +17,15 @@ import psycopg
 from psycopg.rows import dict_row
 from contextlib import asynccontextmanager
 
-
-# Optional: Chroma HTTP client (works with chroma server)
-import chromadb
-from chromadb.config import Settings
-
-# Optional: OpenAI (LLM for final answer)
-from openai import OpenAI
-
-# ---------- boot ----------
-load_dotenv(override=True)
-
-import os
-import json
-import time
-from typing import List, Optional, Literal, Dict, Any
-from dataclasses import dataclass
-
-# GCP Storage
-from google.cloud import storage
-from google.oauth2 import service_account
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-
-import requests
-import psycopg
-from psycopg.rows import dict_row
-from contextlib import asynccontextmanager
-
 # ChromaDB Cloud client
 import chromadb
 from chromadb.config import Settings
 
 # OpenAI (LLM for final answer)
 from openai import OpenAI
+
+# Wikipedia fallback
+import wikipedia
 
 # ---------- boot ----------
 load_dotenv(override=True)
@@ -198,10 +171,15 @@ def ensure_cache_table():
     try:
         with get_pg_conn() as conn, conn.cursor() as cur:
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS concept_cache (
-              concept TEXT PRIMARY KEY,
-              answer TEXT NOT NULL,
-              sources JSONB NOT NULL,
+            CREATE TABLE IF NOT EXISTS rag_cache (
+              query TEXT PRIMARY KEY,
+              collection_name TEXT,
+              gen_model TEXT,
+              embed_model TEXT,
+              answer_text TEXT,
+              answer_json JSONB,
+              sources_json JSONB,
+              retrieval_source TEXT,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """)
@@ -246,27 +224,9 @@ class RetrievedChunk:
     score: Optional[float] = None
 
 def search_gcs_concepts(query: str) -> Optional[Dict[str, Any]]:
-    """
-    Search for concept data in GCS bucket
-    Returns the concept data if found
-    """
+    """Search for concept data in GCS bucket - simplified version"""
     try:
-        # Try to fetch the specific concept
-        concept_data = fetch_concept_from_gcs(query)
-        
-        if concept_data:
-            return concept_data
-        
-        # If not found, try to find similar concepts
-        all_concepts = list_all_concepts_from_gcs()
-        query_lower = query.lower()
-        
-        for concept in all_concepts:
-            if query_lower in concept.lower():
-                return fetch_concept_from_gcs(concept)
-        
-        return None
-        
+        return fetch_concept_from_gcs(query)
     except Exception as e:
         print(f"❌ Error searching GCS concepts: {e}")
         return None
@@ -302,26 +262,16 @@ def search_pdf_chunks(query: str, k: int = PDF_TOP_K) -> List[RetrievedChunk]:
         return []
 
 # ---------- wikipedia fallback ----------
-def fetch_wikipedia_summary(topic: str, sentences: int = 3) -> Optional[Dict[str, Any]]:
-    """Uses Wikipedia REST summary API"""
-    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(topic)}"
+def fetch_wikipedia_summary(topic: str, sentences: int = 5) -> Optional[Dict[str, Any]]:
+    """Uses Wikipedia library for fallback"""
     try:
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
+        summary = wikipedia.summary(topic, sentences=sentences)
+        if not summary:
             return None
-        data = r.json()
-        text = data.get("extract") or ""
-        if not text:
-            return None
-        # trim to roughly N sentences
-        parts = text.split(". ")
-        short = ". ".join(parts[:sentences]).strip()
-        if short and not short.endswith("."):
-            short += "."
         return {
-            "url": data.get("content_urls", {}).get("desktop", {}).get("page"),
-            "title": data.get("title"),
-            "summary": short
+            "title": topic,
+            "summary": summary,
+            "source": "Wikipedia"
         }
     except Exception as e:
         print(f"❌ Wikipedia fetch error: {e}")
@@ -339,12 +289,7 @@ def synthesize_answer(
     gcs_data: Optional[Dict[str, Any]],
     wiki: Optional[Dict[str, Any]]
 ) -> str:
-    """
-    Synthesize answer from multiple sources:
-    1. ChromaDB PDF chunks
-    2. GCS seed concepts
-    3. Wikipedia fallback
-    """
+    """Synthesize answer from available sources"""
     sources_text = ""
     
     # Priority 1: PDF chunks from ChromaDB
@@ -360,21 +305,15 @@ def synthesize_answer(
     
     # Priority 2: GCS seed concepts
     elif gcs_data:
-        if isinstance(gcs_data, dict):
-            # Extract relevant info from GCS data
-            summary = gcs_data.get("summary", "") or gcs_data.get("answer", "") or str(gcs_data)
-            sources_text = f"SEED CONCEPT (from GCS):\n- {summary[:1500]}"
-        else:
-            sources_text = f"SEED CONCEPT (from GCS):\n- {str(gcs_data)[:1500]}"
+        summary = gcs_data.get("summary", "") or gcs_data.get("answer", "") or str(gcs_data)
+        sources_text = f"SEED CONCEPT (from GCS):\n- {summary[:1500]}"
     
     # Priority 3: Wikipedia fallback
     elif wiki:
-        sources_text = f"WIKIPEDIA:\n- {wiki.get('summary','')}\n- url: {wiki.get('url','')}"
+        sources_text = f"WIKIPEDIA:\n- {wiki.get('summary','')}"
 
     system = (
-        "You are an expert financial advisor and technical writer. "
-        "Answer clearly and concisely using the provided context. "
-        "Prioritize information in this order: PDF excerpts, seed concepts from internal database, then Wikipedia. "
+        "You are an expert financial advisor. Answer clearly using the provided context. "
         "Do not invent citations—stick to section/page when present."
     )
     user = f"QUESTION:\n{query}\n\nCONTEXT:\n{sources_text}"
@@ -397,29 +336,45 @@ def synthesize_answer(
         print(f"❌ OpenAI error: {e}")
         return f"Error generating answer: {str(e)}"
 
-# ---------- cache helpers ----------
-def cache_get(concept: str) -> Optional[Dict[str, Any]]:
+# ---------- cache helpers (PostgreSQL like DAG) ----------
+def cache_get_pg(query: str) -> Optional[Dict[str, Any]]:
+    """Get cached result from PostgreSQL (like DAG)"""
     try:
         with get_pg_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT concept, answer, sources, created_at FROM concept_cache WHERE concept=%s", 
-                (concept,)
-            )
+            cur.execute("SELECT answer_json FROM rag_cache WHERE query = %s", (query,))
             row = cur.fetchone()
-            return row if row else None
+            if row:
+                cached_data = row[0]
+                if isinstance(cached_data, dict):
+                    return cached_data
+            return None
     except Exception as e:
         print(f"❌ Cache get error: {e}")
         return None
 
-def cache_put(concept: str, answer: str, sources: List[Dict[str, Any]]) -> None:
+def cache_put_pg(query: str, collection: str, gen_model: str, embed_model: str,
+                 answer_text: str, answer_json: dict, sources_json: list, retrieval_source: str) -> None:
+    """Put result in PostgreSQL cache (like DAG)"""
     try:
         with get_pg_conn() as conn, conn.cursor() as cur:
             cur.execute("""
-            INSERT INTO concept_cache (concept, answer, sources)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (concept) DO UPDATE
-              SET answer=EXCLUDED.answer, sources=EXCLUDED.sources, created_at=NOW()
-            """, (concept, answer, json.dumps(sources)))
+                INSERT INTO rag_cache (query, collection_name, gen_model, embed_model,
+                                       answer_text, answer_json, sources_json, retrieval_source)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (query)
+                DO UPDATE SET 
+                    collection_name = EXCLUDED.collection_name,
+                    gen_model = EXCLUDED.gen_model,
+                    embed_model = EXCLUDED.embed_model,
+                    answer_text = EXCLUDED.answer_text,
+                    answer_json = EXCLUDED.answer_json,
+                    sources_json = EXCLUDED.sources_json,
+                    retrieval_source = EXCLUDED.retrieval_source,
+                    created_at = CURRENT_TIMESTAMP
+            """, (
+                query, collection, gen_model, embed_model,
+                answer_text, json.dumps(answer_json), json.dumps(sources_json), retrieval_source
+            ))
     except Exception as e:
         print(f"❌ Cache put error: {e}")
 
@@ -524,12 +479,12 @@ def query(req: QueryRequest):
     if not q:
         raise HTTPException(status_code=400, detail="query cannot be empty")
 
-    # 1) Check cache
+    # 1) Check cache first (like DAG)
     if not req.refresh:
-        cached = cache_get(q.lower())
-        if cached:
+        cached = cache_get_pg(q.lower())
+        if cached and "answer" in cached:
             srcs = []
-            for s in cached["sources"]:
+            for s in cached.get("sources", []):
                 srcs.append(SourceCite(**s))
             return QueryResponse(
                 query=q, 
@@ -541,11 +496,13 @@ def query(req: QueryRequest):
     # 2) Search ChromaDB for PDF chunks
     pdf_hits = search_pdf_chunks(q, k=PDF_TOP_K)
     
-    # 3) Search GCS for seed concepts
+    # 3) Search GCS for seed concepts (only if no PDF hits)
     gcs_data = search_gcs_concepts(q) if not pdf_hits else None
 
-    # 4) Wikipedia fallback
-    wiki = fetch_wikipedia_summary(q) if (USE_WIKI and not pdf_hits and not gcs_data) else None
+    # 4) Wikipedia fallback (only if no PDF hits and no GCS data)
+    wiki = None
+    if not pdf_hits and not gcs_data and USE_WIKI:
+        wiki = fetch_wikipedia_summary(q)
 
     if not pdf_hits and not gcs_data and not wiki:
         raise HTTPException(
@@ -558,6 +515,8 @@ def query(req: QueryRequest):
 
     # 6) Prepare citations
     cites: List[SourceCite] = []
+    retrieval_source = "pdf"
+    
     if pdf_hits:
         for c in pdf_hits:
             cites.append(SourceCite(
@@ -565,21 +524,33 @@ def query(req: QueryRequest):
                 page=c.page, 
                 section=c.section
             ))
+        retrieval_source = "pdf"
     elif gcs_data:
         cites.append(SourceCite(
             type="gcs",
             gcs_path=f"gs://{GCP_BUCKET_NAME}/{GCP_SEED_FOLDER}",
             title="Seed Concept from GCS"
         ))
+        retrieval_source = "gcs"
     elif wiki:
         cites.append(SourceCite(
             type="wikipedia", 
-            url=wiki.get("url"), 
-            title=wiki.get("title")
+            title=wiki.get("title"),
+            url=f"https://en.wikipedia.org/wiki/{wiki.get('title', '').replace(' ', '_')}"
         ))
+        retrieval_source = "wikipedia"
 
-    # 7) Save to cache
-    cache_put(q.lower(), answer, [c.model_dump() for c in cites])
+    # 7) Save to cache (like DAG)
+    cache_put_pg(
+        query=q.lower(),
+        collection=CHROMA_COLLECTION,
+        gen_model=ANSWER_MODEL,
+        embed_model="text-embedding-3-large",
+        answer_text=answer,
+        answer_json={"answer": answer, "sources": [c.model_dump() for c in cites]},
+        sources_json=[c.model_dump() for c in cites],
+        retrieval_source=retrieval_source
+    )
 
     return QueryResponse(query=q, answer=answer, used_cache=False, sources=cites)
 
