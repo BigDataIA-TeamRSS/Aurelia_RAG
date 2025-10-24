@@ -13,13 +13,10 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 import requests
-import psycopg
-from psycopg.rows import dict_row
 from contextlib import asynccontextmanager
 
 # ChromaDB Cloud client
 import chromadb
-from chromadb.config import Settings
 
 # OpenAI (LLM for final answer)
 from openai import OpenAI
@@ -35,7 +32,6 @@ PDF_TOP_K = int(os.getenv("PDF_TOP_K", "5"))
 USE_WIKI = os.getenv("WIKI_FALLBACK", "1") == "1"
 
 # vector store config - CHROMADB CLOUD
-CHROMA_HOST = os.getenv("CHROMA_SERVER_HOST", "https://api.trychroma.com")
 CHROMADB_API_KEY = os.getenv("CHROMADB_API_KEY", "ck-BrgcfXPxcyK22Lir6SGqqiVQsEaU5EE8mDbQ71omUUg8")
 CHROMA_TENANT_ID = os.getenv("CHROMA_TENANT_ID", "default_tenant")
 CHROMA_DATABASE = os.getenv("CHROMA_DATABASE", "AURELIA_CHROMA_DB")
@@ -57,12 +53,8 @@ if not GCP_CREDENTIALS_PATH:
 print(f"📁 Base directory: {BASE_DIR}")
 print(f"🔑 GCP credentials: {'Default' if not GCP_CREDENTIALS_PATH else GCP_CREDENTIALS_PATH}")
 
-# postgres config
-PG_HOST = os.getenv("PG_HOST", "127.0.0.1")
-PG_PORT = int(os.getenv("PG_PORT", "5432"))
-PG_DB = os.getenv("PG_DB", "rag_DB")
-PG_USER = os.getenv("PG_USER", "postgres")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "postgres")
+# postgres config (using Cloud SQL connector like DAG)
+# Connection details are hardcoded to match DAG configuration
 
 # llm config
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -151,39 +143,63 @@ def list_all_concepts_from_gcs() -> List[str]:
         print(f"❌ Error listing concepts from GCS: {e}")
         return []
 
-# ---------- db (psycopg3) ----------
+# ---------- db (Cloud SQL connector like DAG) ----------
 def get_pg_conn():
+    """Connect to Cloud SQL using connector (like DAG)"""
     try:
-        return psycopg.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            dbname=PG_DB,
-            user=PG_USER,
-            password=PG_PASSWORD,
-            row_factory=dict_row,
-            autocommit=True,
+        from google.cloud.sql.connector import Connector
+        
+        # Use same connection details as DAG
+        instance_connection_name = "aurelia-475916:us-central1:cache-db"
+        db_user = "postgres"
+        db_pass = "postGre@123"
+        db_name = "rag_DB"
+        
+        print(f"🔧 Connecting to Cloud SQL: {instance_connection_name}")
+        
+        connector = Connector()
+        conn = connector.connect(
+            instance_connection_name,
+            "pg8000",
+            user=db_user,
+            password=db_pass,
+            db=db_name,
         )
+        print(f"✅ Cloud SQL connection successful")
+        return conn
+        
+    except ImportError as e:
+        print(f"⚠️  Cloud SQL connector not available: {e}. Skipping PostgreSQL cache.")
+        return None
     except Exception as e:
-        print(f"❌ Database connection failed: {e}")
-        raise
+        print(f"❌ Cloud SQL connection failed: {e}")
+        return None
 
 def ensure_cache_table():
     try:
-        with get_pg_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS rag_cache (
-              query TEXT PRIMARY KEY,
-              collection_name TEXT,
-              gen_model TEXT,
-              embed_model TEXT,
-              answer_text TEXT,
-              answer_json JSONB,
-              sources_json JSONB,
-              retrieval_source TEXT,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """)
-        print("✅ Cache table ready")
+        conn = get_pg_conn()
+        if conn is None:
+            print("⚠️  No database connection, skipping cache table creation")
+            return
+            
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS rag_cache (
+                  query TEXT PRIMARY KEY,
+                  collection_name TEXT,
+                  gen_model TEXT,
+                  embed_model TEXT,
+                  answer_text TEXT,
+                  answer_json JSONB,
+                  sources_json JSONB,
+                  retrieval_source TEXT,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """)
+            print("✅ Cache table ready")
+        finally:
+            conn.close()
     except Exception as e:
         print(f"⚠️  Cache table creation skipped: {e}")
 
@@ -247,7 +263,8 @@ def search_pdf_chunks(query: str, k: int = PDF_TOP_K) -> List[RetrievedChunk]:
         chunks: List[RetrievedChunk] = []
         if not res or not res.get("documents"):
             return chunks
-        for doc, meta, dist in zip(res["documents"][0], res["metadatas"][0], res.get("distances", [[None]])[0]):
+        distances = res.get("distances", [[]])
+        for doc, meta, dist in zip(res["documents"][0], res["metadatas"][0], distances[0] if distances else [None] * len(res["documents"][0])):
             chunks.append(
                 RetrievedChunk(
                     content=doc,
@@ -339,8 +356,13 @@ def synthesize_answer(
 # ---------- cache helpers (PostgreSQL like DAG) ----------
 def cache_get_pg(query: str) -> Optional[Dict[str, Any]]:
     """Get cached result from PostgreSQL (like DAG)"""
+    conn = get_pg_conn()
+    if conn is None:
+        print("⚠️  Cache get skipped - no database connection")
+        return None
+    
     try:
-        with get_pg_conn() as conn, conn.cursor() as cur:
+        with conn.cursor() as cur:
             cur.execute("SELECT answer_json FROM rag_cache WHERE query = %s", (query,))
             row = cur.fetchone()
             if row:
@@ -351,12 +373,20 @@ def cache_get_pg(query: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"❌ Cache get error: {e}")
         return None
+    finally:
+        if conn:
+            conn.close()
 
 def cache_put_pg(query: str, collection: str, gen_model: str, embed_model: str,
                  answer_text: str, answer_json: dict, sources_json: list, retrieval_source: str) -> None:
     """Put result in PostgreSQL cache (like DAG)"""
+    conn = get_pg_conn()
+    if conn is None:
+        print("⚠️  Cache put skipped - no database connection")
+        return
+    
     try:
-        with get_pg_conn() as conn, conn.cursor() as cur:
+        with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO rag_cache (query, collection_name, gen_model, embed_model,
                                        answer_text, answer_json, sources_json, retrieval_source)
@@ -377,6 +407,9 @@ def cache_put_pg(query: str, collection: str, gen_model: str, embed_model: str,
             ))
     except Exception as e:
         print(f"❌ Cache put error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 # ---------- pydantic models ----------
 class QueryRequest(BaseModel):
@@ -384,7 +417,7 @@ class QueryRequest(BaseModel):
     refresh: bool = Field(False, description="If true, bypass cache and regenerate")
 
 class SourceCite(BaseModel):
-    type: Literal["pdf", "gcs", "wikipedia"]  # FIXED: Added "gcs"
+    type: Literal["pdf", "gcs", "wikipedia"]
     page: Optional[int] = None
     section: Optional[str] = None
     url: Optional[str] = None
@@ -536,7 +569,7 @@ def query(req: QueryRequest):
         cites.append(SourceCite(
             type="wikipedia", 
             title=wiki.get("title"),
-            url=f"https://en.wikipedia.org/wiki/{wiki.get('title', '').replace(' ', '_')}"
+            url=f"https://en.wikipedia.org/wiki/{wiki.get('title', '').replace(' ', '_') if wiki.get('title') else ''}"
         ))
         retrieval_source = "wikipedia"
 
