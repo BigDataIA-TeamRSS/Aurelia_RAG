@@ -72,13 +72,17 @@ CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "fintbx_concepts")
 GCP_BUCKET_NAME = os.getenv("GCP_BUCKET_NAME", "aurelia-concepts")
 GCP_SEED_FOLDER = os.getenv("GCP_SEED_FOLDER", "seed_concept/out/")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-print(f"📁 Base directory: {BASE_DIR}")
 
-# Build absolute path to service-account.json
-GCP_CREDENTIALS_PATH = os.path.join(BASE_DIR, "service-account.json")
-print(f"🔑 GCP credentials path: {GCP_CREDENTIALS_PATH}")
-print(f"✅ File exists: {os.path.exists(GCP_CREDENTIALS_PATH)}")
-# GCP_CREDENTIALS_PATH = os.getenv("GCP_CREDENTIALS_PATH")  # Fixed path
+# For Cloud Run, use default credentials or service account from environment
+GCP_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if not GCP_CREDENTIALS_PATH:
+    # Try local service account file for development
+    GCP_CREDENTIALS_PATH = os.path.join(BASE_DIR, "service-account.json")
+    if not os.path.exists(GCP_CREDENTIALS_PATH):
+        GCP_CREDENTIALS_PATH = None
+
+print(f"📁 Base directory: {BASE_DIR}")
+print(f"🔑 GCP credentials: {'Default' if not GCP_CREDENTIALS_PATH else GCP_CREDENTIALS_PATH}")
 
 # postgres config
 PG_HOST = os.getenv("PG_HOST", "127.0.0.1")
@@ -96,16 +100,17 @@ def get_gcs_client():
     """Initialize GCP Storage client"""
     try:
         if GCP_CREDENTIALS_PATH and os.path.exists(GCP_CREDENTIALS_PATH):
+            print(f"🔑 Using service account file: {GCP_CREDENTIALS_PATH}")
             credentials = service_account.Credentials.from_service_account_file(
                 GCP_CREDENTIALS_PATH
             )
             return storage.Client(credentials=credentials)
         else:
-            # Use default credentials (for GCP environments)
-            print("⚠️  Using default GCP credentials")
+            # Use default credentials (for Cloud Run and other GCP environments)
+            print("🔑 Using default GCP credentials")
             return storage.Client()
     except Exception as e:
-        print(f"⚠️  GCP client initialization warning: {e}")
+        print(f"❌ GCP client initialization failed: {e}")
         return None
 
 def fetch_concept_from_gcs(concept_name: str) -> Optional[Dict[str, Any]]:
@@ -175,15 +180,19 @@ def list_all_concepts_from_gcs() -> List[str]:
 
 # ---------- db (psycopg3) ----------
 def get_pg_conn():
-    return psycopg.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        dbname=PG_DB,
-        user=PG_USER,
-        password=PG_PASSWORD,
-        row_factory=dict_row,
-        autocommit=True,
-    )
+    try:
+        return psycopg.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            dbname=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            row_factory=dict_row,
+            autocommit=True,
+        )
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
+        raise
 
 def ensure_cache_table():
     try:
@@ -204,7 +213,8 @@ def ensure_cache_table():
 def get_chroma_collection():
     """Connect to ChromaDB Cloud"""
     if not CHROMADB_API_KEY:
-        raise ValueError("CHROMADB_API_KEY is required for ChromaDB Cloud")
+        print("⚠️  CHROMADB_API_KEY not provided, ChromaDB unavailable")
+        return None
     
     try:
         # Create CloudClient
@@ -225,7 +235,7 @@ def get_chroma_collection():
         
     except Exception as e:
         print(f"❌ Failed to connect to ChromaDB Cloud: {e}")
-        raise
+        return None
 
 @dataclass
 class RetrievedChunk:
@@ -265,6 +275,10 @@ def search_pdf_chunks(query: str, k: int = PDF_TOP_K) -> List[RetrievedChunk]:
     """Search ChromaDB Cloud for relevant chunks"""
     try:
         col = get_chroma_collection()
+        if col is None:
+            print("⚠️  ChromaDB not available, returning empty results")
+            return []
+            
         res = col.query(
             query_texts=[query], 
             n_results=k, 
@@ -444,7 +458,13 @@ class ConceptListResponse(BaseModel):
 async def lifespan(app: FastAPI):
     # Startup
     print("🚀 Starting up AURELIA...")
-    ensure_cache_table()
+    
+    # Initialize cache table (optional)
+    try:
+        ensure_cache_table()
+    except Exception as e:
+        print(f"⚠️  Cache initialization failed: {e}")
+        print("⚠️  Application will continue without caching")
     
     # Test GCS connection
     try:
@@ -459,6 +479,16 @@ async def lifespan(app: FastAPI):
             print("⚠️  GCS client not initialized")
     except Exception as e:
         print(f"⚠️  GCS connection test failed: {e}")
+    
+    # Test ChromaDB connection
+    try:
+        col = get_chroma_collection()
+        if col:
+            print("✅ ChromaDB connection successful")
+        else:
+            print("⚠️  ChromaDB not available")
+    except Exception as e:
+        print(f"⚠️  ChromaDB connection test failed: {e}")
     
     yield
     # Shutdown

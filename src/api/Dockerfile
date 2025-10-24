@@ -1,14 +1,16 @@
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED True
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
-ENV APP_HOME /app
-WORKDIR $APP_HOME
-COPY . ./
+WORKDIR /app
 
-ENV PORT 1234
-
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# As an example here we're running the web service with one worker on uvicorn.
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1
+# Copy the rest of the application
+COPY . .
+
+# Use Cloud Run's PORT environment variable (defaults to 8080 if not set)
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT}
