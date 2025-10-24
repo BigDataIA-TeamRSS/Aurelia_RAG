@@ -1,0 +1,15 @@
+{
+  "concepts": [
+    "Duration",
+    "Sharpe Ratio", 
+    "Value at Risk",
+    "Honey Bee Colony",
+    "Ferrari"
+  ],
+  "metadata": {
+    "description": "Financial concepts to seed in the RAG system",
+    "source": "Financial Toolbox User's Guide",
+    "last_updated": "2025-01-24",
+    "total_concepts": 6
+  }
+}
