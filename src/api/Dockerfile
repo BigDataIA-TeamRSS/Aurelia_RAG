@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-# FROM python:3.11-slim
-# ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-# WORKDIR /app
-# COPY requirements.txt /app/requirements.txt
-# RUN pip install --no-cache-dir -r /app/requirements.txt
-# COPY . /app
-# CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
-
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED True
@@ -21,12 +12,3 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # As an example here we're running the web service with one worker on uvicorn.
 CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1
-=======
-FROM python:3.11-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8080
-WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY . /app
-CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8080"]
->>>>>>> 2effb648194d6c5260b340d210873751f7046573
