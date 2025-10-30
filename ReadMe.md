@@ -26,9 +26,11 @@ The stack includes: FastAPI (service), Streamlit (UI), Pinecone/ChromaDB (vector
 
 ### Lab 1 — PDF Corpus Construction
 
-- Parse fintbx.pdf preserving reading order, figure/table captions, equations, and code.
+- Raw data i.e PDF is fetched from gcp cloud bucket.
 
-- Experiment with multiple chunkers:
+- Parse fintbx.pdf preserving reading order, figure/table captions, equations, and code. Tool Used - PyMuPDF open SOurce library.
+
+- Experiment with multiple chunkers: Tool Used : Langchain Text Splitter library. Storage - Stored in GCP bucket and ChromaDB 
 
   - RecursiveCharacterTextSplitter
 
@@ -36,23 +38,45 @@ The stack includes: FastAPI (service), Streamlit (UI), Pinecone/ChromaDB (vector
 
   - Code-aware splitter
 
-- Choose final chunk size/overlap based on retrieval quality (e.g., precision@k, MRR, recall@k) and latency.
+- Choose final chunk size and overlap i.e size=1000 based on retrieval quality (e.g., precision@k, MRR, recall@k) and latency. ( Stored in GCP bucket and ChromaDB )
 
-- Write embeddings + metadata (section title, page no.).
+- Write embeddings + metadata (section title, page no.). Tool - Stored in ChromaDB inside collections folder called fintbx_concepts.
 
 ### Lab 2 — Managed Orchestration
 
+Tool - Built using GCP composer.
 - DAG: fintbx_ingest_dag
 Pull fintbx.pdf from bucket → parse → chunk experiments → embed → vector DB write.
 
 - DAG: concept_seed_dag
 Generate/refresh concept JSON via instructor client → upsert to Postgres cache.
 
-### Lab 3 — FastAPI RAG Service
+### Lab 3 — FastAPI RAG Service 
+
+Tool - Deployed on GCP cloud Build, connected to this Github repository.
 
 - Implements retrieval pipeline + Wikipedia fallback.
 
 - Provides /query & /seed + health endpoints.
+
+- /seed:
+   - This DAG triggers with predefined list of financial concepts
+   - Send query to /seed endpoint with the concept list
+   - For every concept it will query in vector store for relevant chunks from fintbx.pdf
+   - If relevant content found then Generate structured ConceptNote using instructor + LLM and store in database(postgre in gcp)
+   - If no relevant content found the output as the concept is not relevent
+
+  - /query:
+    - Querying the data using /query using Streamlit
+    - Check database for cached data i.e concept note is present 
+    - Incase of data is in cached (postgre) return the query immediately as final answer to user.
+    - Considering if not cached query vector store for relevant chunks from fintbx.pdf using RAG architecture and embedding stored to retrive the matched answer to the           query
+      If content found then it will generate note from fintbx.pdf
+    - If there is no data found then we will check if concept is relevant or not
+    - For relevant finacial topic data is fected from Wikipedia and generate answer as final ouput to user
+    - Store generated note in database(postgre) as cached
+   
+  
 
 ### Lab 4 — Streamlit (Cloud)
 
@@ -61,23 +85,23 @@ Generate/refresh concept JSON via instructor client → upsert to Postgres cache
 - Talks to API, displays notes & references.
 
 ### Lab 5 — Evaluation & Benchmarking
+Following is documented in codelab.
+-  Performance: cached vs new generation latency; vector search latency; token costs.
+   - Compared common query retrival time for fresh and cached query , calculated it using python function predefined logic and displayed on stremlit UI.
+   - Calculated cost per query.
+-  Compare Pinecone vs ChromaDB for both quality and latency. Compared which vectore storage is better.
 
-- Quality: accuracy, completeness, citation fidelity.
+  
 
-- Performance: cached vs new generation latency; vector search latency; token costs.
-
-- Compare Pinecone vs ChromaDB for both quality and latency.
 
 ## ☁️ Cloud Deployment (GCP Reference)
 ### 1) Storage & Databases
 
 - Create GCS bucket for artifacts (raw PDF, parsed JSON, embeddings):
-
-    - gs://project-aurelia-<id>/fintbx/raw/
-
-    - .../parsed/
-
-    - .../embeddings/
+    - fintxb_pdf - GCP Bucket has raw data stored that is pdf 
+    - fintxb_chunks - Has chunks, embedding , plain text and json format of parsed , chunked and embedded pdf.
+    - aurelia_cncept/seed_concet - Has concept pre-defined and seeded.
+    - /dag/ - stored all ython files necessary to run the DAG.
 
 - Cloud SQL (Postgres): create an instance + database aurelia_db and set PG_* envs.
 
