@@ -213,6 +213,10 @@ Retrieve a single concept from the cache if present (no regeneration).
 
 - Includes a small latency & token usage footer for transparency.
 
+## Codelab & Demo
+[codelab](https://codelabs-preview.appspot.com/?file_id=1qAdsxU0h5gxf8uIa31Kf0t2GxHBP56iIXbiIyN-kHIQ#0)
+[demo](https://drive.google.com/file/d/1301E82ATM7ArIvbOMyI-z7C-8mWxRWVt/view?usp=drive_link)
+
 ## 👥 Team Contributions
 
 | Member | Contribution | Percentage |
